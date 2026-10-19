@@ -307,32 +307,88 @@ function blobToBase64(blob) {
   });
 }
 
+const ITEM_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['name', 'grams', 'kcal', 'protein', 'carbs', 'fat', 'fiber', 'sugar', 'sodium', 'source', 'source_url'],
+  properties: {
+    name: { type: 'string' }, grams: { type: 'number' }, kcal: { type: 'number' },
+    protein: { type: 'number' }, carbs: { type: 'number' }, fat: { type: 'number' },
+    fiber: { type: 'number' }, sugar: { type: 'number' }, sodium: { type: 'number' },
+    source: { type: 'string', enum: ['label', 'estimate', 'history', 'web'] },
+    source_url: { type: ['string', 'null'], description: 'For source "web": the page the values came from. Otherwise null.' },
+  },
+};
 const MEAL_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   required: ['meal_name', 'items', 'confidence', 'assumptions'],
   properties: {
     meal_name: { type: 'string' },
-    items: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['name', 'grams', 'kcal', 'protein', 'carbs', 'fat', 'fiber', 'sugar', 'sodium', 'source'],
-        properties: {
-          name: { type: 'string' }, grams: { type: 'number' }, kcal: { type: 'number' },
-          protein: { type: 'number' }, carbs: { type: 'number' }, fat: { type: 'number' },
-          fiber: { type: 'number' }, sugar: { type: 'number' }, sodium: { type: 'number' },
-          source: { type: 'string', enum: ['label', 'estimate'] },
-        },
-      },
-    },
+    items: { type: 'array', items: ITEM_SCHEMA },
     confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
     assumptions: { type: 'string' },
   },
 };
 
-async function askMeal(prompt, files, signal) {
+// Tools Claude can use while estimating. The two client tools run here in the page; the web tools run on Anthropic's side.
+const CLIENT_TOOLS = [
+  {
+    name: 'search_food_log',
+    description: 'Search the user\'s own food log in this app. Use it whenever the user refers to something they ate before ("same yogurt as yesterday", "the usual breakfast", "like Monday\'s lunch"). Returns matching past meals with every item\'s grams and macros, newest first. Search by food words (try Portuguese and English spellings, e.g. "iogurte" and "yogurt"), by date, or both. With only a date, returns every meal from that day.',
+    strict: true,
+    input_schema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['query', 'date', 'days_back'],
+      properties: {
+        query: { type: ['string', 'null'], description: 'Food words to look for in meal names, notes and items. Null to list by date only.' },
+        date: { type: ['string', 'null'], description: 'A single day, YYYY-MM-DD. Null to search a range.' },
+        days_back: { type: ['integer', 'null'], description: 'When date is null: how many days back from today to search (default 30, max 120).' },
+      },
+    },
+  },
+  {
+    name: 'submit_estimate',
+    description: 'Submit the final nutrition estimate for this meal. Call it exactly once, as your last step, after any lookups.',
+    strict: true,
+    input_schema: MEAL_SCHEMA,
+  },
+];
+const WEB_TOOLS = [
+  { type: 'web_search_20260209', name: 'web_search', max_uses: 3, user_location: { type: 'approximate', country: 'PT', timezone: 'Europe/Lisbon' } },
+  { type: 'web_fetch_20260209', name: 'web_fetch', max_uses: 3, max_content_tokens: 20000 },
+];
+
+const fold = s => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+function searchFoodLog(input) {
+  const today = todayKey();
+  const q = fold(input?.query || '').split(/[^a-z0-9]+/).filter(w => w.length >= 3);
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(input?.date || '') ? input.date : null;
+  const back = Math.min(120, Math.max(1, Number(input?.days_back) || 30));
+  const from = addDays(today, -back);
+  const hits = [];
+  for (const [k, day] of Object.entries(S.days)) {
+    if (date ? k !== date : (k < from || k > today)) continue;
+    for (const m of day?.meals || []) {
+      const hay = fold([m.name, m.note, ...(m.items || []).map(i => i.name)].join(' '));
+      // A word matches if either side starts with the other's first 5 letters ("iogurt" ~ "iogurte").
+      const score = q.length ? q.filter(w => hay.includes(w) || hay.includes(w.slice(0, 5))).length : 1;
+      if (score) hits.push({ score, k, m });
+    }
+  }
+  hits.sort((a, b) => b.score - a.score || b.k.localeCompare(a.k) || (b.m.time || '').localeCompare(a.m.time || ''));
+  const meals = hits.slice(0, 15).map(({ k, m }) => ({
+    date: k, time: m.time, meal: m.type, name: m.name, note: m.note || '',
+    items: (m.items || []).map(i => ({ name: i.name, grams: i.grams, kcal: i.kcal, protein: i.protein, carbs: i.carbs, fat: i.fat, fiber: i.fiber, sugar: i.sugar, sodium: i.sodium })),
+  }));
+  return meals.length ? { today, meals } : { today, meals: [], note: 'No matching meals. Try other words (Portuguese/English), a date, or a longer range.' };
+}
+
+const isWebToolRejection = e => SDK && e instanceof SDK.BadRequestError && /web[_ ]?(search|fetch)/i.test(String(e?.error?.error?.message || e?.message || ''));
+let webToolsOff = false;
+
+async function askMeal(prompt, files, signal, onStatus = () => {}) {
   const c = await getClient();
   const content = [];
   for (const f of files) {
@@ -340,15 +396,51 @@ async function askMeal(prompt, files, signal) {
     content.push({ type: 'image', source: { type: 'base64', media_type: mt, data: await blobToBase64(f) } });
   }
   content.push({ type: 'text', text: prompt });
-  const resp = await c.beta.messages.create({
-    ...BASE_PARAMS,
-    max_tokens: 16000,
-    output_config: { effort: 'medium', format: { type: 'json_schema', schema: MEAL_SCHEMA } },
-    messages: [{ role: 'user', content }],
-  }, { signal });
-  if (resp.stop_reason === 'refusal') throw { code: 'refused' };
-  const text = resp.content.filter(b => b.type === 'text').map(b => b.text).join('');
-  try { return JSON.parse(text); } catch { throw { code: 'bad_json' }; }
+
+  const run = async (withWeb) => {
+    const messages = [{ role: 'user', content }];
+    const tools = withWeb ? [...CLIENT_TOOLS, ...WEB_TOOLS] : CLIENT_TOOLS;
+    for (let round = 0; round < 8; round++) {
+      const resp = await c.beta.messages.create({
+        ...BASE_PARAMS, max_tokens: 16000, output_config: { effort: 'medium' }, tools, messages,
+      }, { signal });
+      if (resp.stop_reason === 'refusal') throw { code: 'refused' };
+      const blocks = resp.content;
+      const submit = blocks.find(b => b.type === 'tool_use' && b.name === 'submit_estimate');
+      if (submit) return submit.input;
+      if (blocks.some(b => b.type === 'server_tool_use')) onStatus('Checking the web…');
+      if (resp.stop_reason === 'pause_turn') { messages.push({ role: 'assistant', content: blocks }); continue; }
+      const calls = blocks.filter(b => b.type === 'tool_use');
+      if (resp.stop_reason === 'tool_use' && calls.length) {
+        messages.push({ role: 'assistant', content: blocks });
+        const results = calls.map(t => {
+          if (t.name === 'search_food_log') {
+            onStatus('Checking your past meals…');
+            return { type: 'tool_result', tool_use_id: t.id, content: JSON.stringify(searchFoodLog(t.input)) };
+          }
+          return { type: 'tool_result', tool_use_id: t.id, content: 'Unknown tool.', is_error: true };
+        });
+        messages.push({ role: 'user', content: results });
+        onStatus('Working out the macros…');
+        continue;
+      }
+      // Ended without submitting: accept JSON written as text, otherwise ask once for the submission.
+      const text = blocks.filter(b => b.type === 'text').map(b => b.text).join('');
+      const s = text.indexOf('{'), e = text.lastIndexOf('}');
+      if (s >= 0 && e > s) { try { const j = JSON.parse(text.slice(s, e + 1)); if (Array.isArray(j.items)) return j; } catch {} }
+      messages.push({ role: 'assistant', content: blocks }, { role: 'user', content: 'Please call submit_estimate with your estimate now.' });
+    }
+    throw { code: 'bad_json' };
+  };
+
+  if (!webToolsOff) {
+    try { return await run(true); }
+    catch (e) {
+      if (!isWebToolRejection(e)) throw e;
+      webToolsOff = true; // web search is switched off for this API account; carry on without it
+    }
+  }
+  return run(false);
 }
 
 async function askReview(prompt, onText, signal) {
@@ -618,8 +710,20 @@ function closeEditor() {
   if (S.ed) { S.ed.ctl?.abort(); S.ed.urls.forEach(u => URL.revokeObjectURL(u)); }
   S.ed = null; $('#sheet').hidden = true; document.body.style.overflow = '';
 }
+function srcLabel(it) {
+  if (it.source === 'label') return 'From the label';
+  if (it.source === 'manual') return 'Entered by you';
+  if (it.source === 'history') return 'From your past meals';
+  if (it.source === 'web') {
+    let host = '';
+    try { host = new URL(it.source_url).hostname.replace(/^www\./, ''); } catch {}
+    return host ? `From the web: <a href="${esc(it.source_url)}" target="_blank" rel="noopener noreferrer">${esc(host)}</a>` : 'From the web';
+  }
+  return 'Estimated from photo/note';
+}
 function withBase(it) {
   const o = { name: it.name || '', grams: r0(it.grams), source: it.source || 'estimate' };
+  if (it.source_url && /^https?:\/\//.test(it.source_url)) o.source_url = String(it.source_url);
   NUTRS.forEach(k => o[k] = r1(it[k]));
   o.base = { grams: o.grams || 0 }; NUTRS.forEach(k => o.base[k] = o[k]);
   return o;
@@ -640,7 +744,7 @@ function renderSheet() {
         <label><span><i style="--c:var(--carbs)"></i>Carbs</span><input type="number" inputmode="decimal" id="it-${i}-carbs" data-f="carbs" value="${it.carbs}"></label>
         <label><span><i style="--c:var(--fat)"></i>Fat</span><input type="number" inputmode="decimal" id="it-${i}-fat" data-f="fat" value="${it.fat}"></label>
       </div>
-      <div class="src">${it.source === 'label' ? 'From the label' : it.source === 'manual' ? 'Entered by you' : 'Estimated from photo/note'} · changing grams rescales the rest</div>
+      <div class="src">${srcLabel(it)} · changing grams rescales the rest</div>
     </div>`).join('');
 
   $('#sheet').innerHTML = `<div class="wrap">
@@ -729,6 +833,13 @@ ${nPhotos ? `Look carefully at the ${nPhotos} attached photo(s). They may show a
 
 User's note: ${note ? `"${note}"` : '(none)'}
 
+Today is ${todayKey()} (${new Date().toLocaleDateString('en-GB', { weekday: 'long' })}). The user lives in Portugal.
+
+Lookups (use only when they help):
+- Past meals: if the note refers to something eaten before ("same yogurt as yesterday", "the usual", "like Monday's lunch"), call search_food_log and reuse those items' values, scaled to today's amount. Mark them source "history". If a search finds nothing, try other spellings (Portuguese/English) or search by date before falling back to an estimate.
+- Restaurants, chains and branded products: if the meal is a named item from a restaurant or brand (e.g. "CBO menu McDonald's", "Pastelaria Versailles croissant", a specific supermarket product with no label in the photo), use web_search to find its official nutrition information, preferring the brand's own Portuguese website or its nutrition PDF, and web_fetch to open that page if the search snippets lack the numbers. Mark those items source "web" and set source_url to the page used. For a "menu"/meal deal, add each part (burger, fries size, drink) as its own item; if the size or drink is not stated, assume the standard medium menu with the most common drink and say so in assumptions.
+- Do not search the web for generic foods (rice, chicken breast, banana) or when a readable label is in the photo.
+
 Rules:
 - Labels are often in Portuguese (Portugal or Brazil) or English: "Valor energético" (use the kcal figure, never kJ), "Lípidos" = fat, "dos quais saturados" = saturates, "Hidratos de carbono" = carbs, "dos quais açúcares" = sugar, "Fibra" = fiber, "Proteínas" = protein, "Carboidratos" = carbs, "Gorduras totais" = fat, "Sódio" = sodium, "Sal" = salt (sodium mg = salt g × 400). Values are usually "por 100 g" / "por 100 ml" and/or "por porção" (Brazilian labels list the portion size and "%VD"); work out which column is which.
 - If label values are available, use them and scale to the amount eaten: from the note; else the portion printed on the label; else the package's net weight (peso líquido) if it is a single-serve item. Mark those items source "label".
@@ -742,7 +853,11 @@ Confidence, judged on the final numbers:
 - "medium": label values are clear but the amount eaten was assumed, or a common dish with a clearly visible or described portion.
 - "low": key values (kcal or protein) had to be guessed, or portion sizes are a rough guess.
 
-meal_name: a short descriptive name. assumptions: one or two short sentences on what you assumed, and if confidence is not high, the one thing the user could add to raise it (e.g. "Add how many grams you ate").`;
+- "high" also applies to values taken from the user's own history or an official brand nutrition page, when the amount is known.
+
+meal_name: a short descriptive name. assumptions: one or two short sentences on what you assumed and where the numbers came from, and if confidence is not high, the one thing the user could add to raise it (e.g. "Add how many grams you ate").
+
+When done, call submit_estimate once with the result. Use source_url null unless source is "web".`;
 }
 
 async function analyze() {
@@ -755,7 +870,10 @@ async function analyze() {
   ed.ctl = new AbortController();
   try {
     const files = ed.files.slice(0, MAX_PHOTOS);
-    const r = await askMeal(mealPrompt(ed.note, files.length), files, ed.ctl.signal);
+    const r = await askMeal(mealPrompt(ed.note, files.length), files, ed.ctl.signal, s => {
+      if (S.ed !== ed) return;
+      ed.status = s; const el = $('#ed-status'); if (el) el.textContent = s;
+    });
     if (S.ed !== ed) return;
     const items = Array.isArray(r?.items) ? r.items : [];
     ed.items = items.filter(i => i && typeof i === 'object').map(withBase);
