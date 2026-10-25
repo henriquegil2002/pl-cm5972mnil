@@ -740,12 +740,12 @@ function settingsHTML() {
 
   ${(() => {
     const n = unsplitMeals().length;
-    return n || S.splitStatus ? `<section class="card">
+    return `<section class="card" id="sugar-split">
     <h2>Sugar split for past meals</h2>
-    <p class="hint">${n ? `${n} meal${n === 1 ? '' : 's'} were logged before the app split sugar into added and natural, so those days show “Can’t tell yet”. Claude can estimate the added sugar from the foods you logged. It costs about 1 cent per 60 foods.` : 'All your meals have their sugar split.'}</p>
+    <p class="hint">${n ? `${n} meal${n === 1 ? '' : 's'} on this phone ${n === 1 ? 'was' : 'were'} logged before the app split sugar into added and natural, so those days show “Can’t tell yet”. Claude can estimate the added sugar from the foods you logged. It costs about 1 cent per 60 foods.` : Object.keys(S.days).length ? 'All your meals have their sugar split. Nothing to do.' : 'No meals on this phone yet. New meals get their sugar split automatically.'}</p>
     ${n ? `<button type="button" class="btn" data-act="split-sugar" ${S.splitBusy ? 'disabled' : ''}>${S.splitBusy ? 'Splitting…' : `Split sugar for ${n} past meal${n === 1 ? '' : 's'}`}</button>` : ''}
     <p class="status" id="split-status">${esc(S.splitStatus || '')}</p>
-  </section>` : '';
+  </section>`;
   })()}
 
   <section class="card">
