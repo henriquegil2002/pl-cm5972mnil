@@ -26,19 +26,19 @@ img { max-width: 100%; }
 :root {
   --bg: #EEF1EC; --surface: #FFFFFF; --ink: #18201D; --muted: #5D6A64; --line: #CDD5CF; --track: #E2E7E3;
   --accent: #155E4F; --accent-ink: #FFFFFF; --accent-soft: #D7E8E2;
-  --protein: #2D55C8; --carbs: #B87D0E; --fat: #B23F72; --fiber: #4F7A2A; --warn: #B4441B; --ok: #2E7D4F;
+  --protein: #2D55C8; --carbs: #B87D0E; --fat: #B23F72; --fiber: #4F7A2A; --warn: #B4441B; --ok: #2E7D4F; --natural: #8E9CC0;
   --display: 'Archivo', 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif;
   --body: 'Public Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
   --bg: #0F1412; --surface: #182019; --ink: #E7EDE9; --muted: #98A49E; --line: #2B3531; --track: #27302C;
   --accent: #62C4A8; --accent-ink: #0B1411; --accent-soft: #1D3A33;
-  --protein: #86A3FF; --carbs: #E8B54A; --fat: #E683B0; --fiber: #9FC86E; --warn: #F0905F; --ok: #6FCB93;
+  --protein: #86A3FF; --carbs: #E8B54A; --fat: #E683B0; --fiber: #9FC86E; --warn: #F0905F; --ok: #6FCB93; --natural: #7E8DB8;
   color-scheme: dark; } }
 :root[data-theme="dark"] {
   --bg: #0F1412; --surface: #182019; --ink: #E7EDE9; --muted: #98A49E; --line: #2B3531; --track: #27302C;
   --accent: #62C4A8; --accent-ink: #0B1411; --accent-soft: #1D3A33;
-  --protein: #86A3FF; --carbs: #E8B54A; --fat: #E683B0; --fiber: #9FC86E; --warn: #F0905F; --ok: #6FCB93;
+  --protein: #86A3FF; --carbs: #E8B54A; --fat: #E683B0; --fiber: #9FC86E; --warn: #F0905F; --ok: #6FCB93; --natural: #7E8DB8;
   color-scheme: dark; }
 
 * { box-sizing: border-box; }
@@ -79,6 +79,16 @@ button { cursor: pointer; }
 .mrow b { font-weight: 800; }
 .mrow .pct { font-weight: 800; font-family: var(--display); }
 .bar { grid-column: 1 / -1; height: 6px; background: var(--track); border-radius: 3px; overflow: hidden; }
+.sugar { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 4px; margin-top: 2px; }
+.sbar-wrap { position: relative; padding-bottom: 14px; }
+.sbar { display: flex; height: 10px; background: var(--track); border-radius: 5px; overflow: hidden; }
+.sbar > i { display: block; height: 100%; }
+.sbar .unk { background: repeating-linear-gradient(45deg, var(--natural) 0 3px, var(--track) 3px 6px); }
+.stick { position: absolute; top: -2px; height: 14px; width: 2px; background: var(--ink); opacity: .55; transform: translateX(-1px); }
+.stick span { position: absolute; top: 15px; left: 50%; transform: translateX(-50%); font-size: .66rem; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.slegend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: .78rem; color: var(--muted); }
+.slegend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+.spill { font-size: .72rem; font-weight: 700; padding: 1px 8px; border-radius: 99px; color: var(--surface); }
 .bar > i { display: block; height: 100%; border-radius: 3px; background: var(--c, var(--accent)); max-width: 100%; }
 .togo { margin: 10px 0 0; font-size: 0.9rem; color: var(--muted); }
 .togo strong { color: var(--ink); }
@@ -208,8 +218,10 @@ const SDK_URL = 'https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@0.131.0/+esm';
 const DATA_KEY = 'plate-ledger-v1';
 const API_KEY = 'plate-ledger-apikey';
 
-const NUTRS = ['kcal', 'protein', 'carbs', 'fat', 'fiber', 'sugar', 'sodium'];
-const DEFAULT_TARGETS = { kcal: 2700, protein: 150, carbs: 340, fat: 80, fiber: 35 };
+const NUTRS = ['kcal', 'protein', 'carbs', 'fat', 'fiber', 'sugar', 'added_sugar', 'sodium'];
+const DEFAULT_TARGETS = { kcal: 2700, protein: 150, carbs: 340, fat: 80, fiber: 35, added_sugar: 25 };
+// WHO: free (added) sugars ideally under 5% of energy, about 25 g a day; the firm limit is 10%.
+const SUGAR_LIMIT = 25;
 const MACROS = [
   { k: 'protein', label: 'Protein', c: 'var(--protein)' },
   { k: 'carbs', label: 'Carbohydrate', c: 'var(--carbs)' },
@@ -244,7 +256,7 @@ function sumItems(items) {
   return t;
 }
 const dayTotals = day => sumItems((day?.meals || []).flatMap(m => m.items || []));
-const targets = () => S.profile?.targets || DEFAULT_TARGETS;
+const targets = () => ({ added_sugar: SUGAR_LIMIT, ...(S.profile?.targets || DEFAULT_TARGETS) });
 const typeForHour = h => h < 11 ? 'Breakfast' : h < 15 ? 'Lunch' : h < 18 ? 'Snack' : 'Dinner';
 const hasKey = () => !!(lsGet(API_KEY) || '').trim();
 
@@ -310,11 +322,11 @@ function blobToBase64(blob) {
 const ITEM_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['name', 'grams', 'kcal', 'protein', 'carbs', 'fat', 'fiber', 'sugar', 'sodium', 'source', 'source_url'],
+  required: ['name', 'grams', 'kcal', 'protein', 'carbs', 'fat', 'fiber', 'sugar', 'added_sugar', 'sodium', 'source', 'source_url'],
   properties: {
     name: { type: 'string' }, grams: { type: 'number' }, kcal: { type: 'number' },
     protein: { type: 'number' }, carbs: { type: 'number' }, fat: { type: 'number' },
-    fiber: { type: 'number' }, sugar: { type: 'number' }, sodium: { type: 'number' },
+    fiber: { type: 'number' }, sugar: { type: 'number' }, added_sugar: { type: 'number', description: 'WHO free sugars in this item, grams (part of sugar).' }, sodium: { type: 'number' },
     source: { type: 'string', enum: ['label', 'estimate', 'history', 'web'] },
     source_url: { type: ['string', 'null'], description: 'For source "web": the page the values came from. Otherwise null.' },
   },
@@ -380,7 +392,7 @@ function searchFoodLog(input) {
   hits.sort((a, b) => b.score - a.score || b.k.localeCompare(a.k) || (b.m.time || '').localeCompare(a.m.time || ''));
   const meals = hits.slice(0, 15).map(({ k, m }) => ({
     date: k, time: m.time, meal: m.type, name: m.name, note: m.note || '',
-    items: (m.items || []).map(i => ({ name: i.name, grams: i.grams, kcal: i.kcal, protein: i.protein, carbs: i.carbs, fat: i.fat, fiber: i.fiber, sugar: i.sugar, sodium: i.sodium })),
+    items: (m.items || []).map(i => ({ name: i.name, grams: i.grams, kcal: i.kcal, protein: i.protein, carbs: i.carbs, fat: i.fat, fiber: i.fiber, sugar: i.sugar, added_sugar: i.added_sugar ?? null, sodium: i.sodium })),
   }));
   return meals.length ? { today, meals } : { today, meals: [], note: 'No matching meals. Try other words (Portuguese/English), a date, or a longer range.' };
 }
@@ -496,6 +508,47 @@ function barHTML(val, target, color) {
   return `<div class="bar"><i style="--c:${color};width:${pct.toFixed(1)}%"></i></div>`;
 }
 
+// One sugar bar: added sugar first (colored by WHO range), natural sugar after it in a fixed color.
+// WHO: added ("free") sugar ideally ≤ 25 g/day; the firm maximum is 10% of energy, about 50 g.
+function sugarRowHTML(day, tot, limit) {
+  let added = 0, natural = 0, unknown = 0, untracked = 0;
+  for (const m of day?.meals || []) {
+    let old = false;
+    for (const i of m.items || []) {
+      const s = Number(i.sugar) || 0;
+      if (i.added_sugar === undefined) { unknown += s; old = true; continue; }
+      const a = Math.min(s || Infinity, Number(i.added_sugar) || 0);
+      added += a; natural += Math.max(0, s - a);
+    }
+    if (old) untracked++;
+  }
+  const ideal = limit || SUGAR_LIMIT, max = ideal * 2;
+  const total = added + natural + unknown;
+  const level = added > max ? { c: 'var(--warn)', t: 'Too much added sugar' }
+    : added > ideal ? { c: 'var(--carbs)', t: 'Above the ideal' }
+    : { c: 'var(--ok)', t: 'Healthy' };
+  const scale = Math.max(90, total, max) * 1.05;
+  const w = g => (g / scale * 100).toFixed(2) + '%';
+  const tick = (g, label) => `<div class="stick" style="left:${w(g)}"><span>${label}</span></div>`;
+  return `<div class="mrow">
+    <div><b>Sugars</b> <span class="num">${fmt(total)} g</span></div>
+    <div><span class="spill" style="background:${level.c}">${level.t}</span></div>
+    <div class="sugar">
+      <div class="sbar-wrap">
+        <div class="sbar" role="img" aria-label="${fmt(added)} g added sugar, ${fmt(natural)} g natural sugar${unknown ? `, ${fmt(unknown)} g not split` : ''}">
+          <i style="width:${w(added)};background:${level.c}"></i><i style="width:${w(natural)};background:var(--natural)"></i>${unknown ? `<i class="unk" style="width:${w(unknown)}"></i>` : ''}
+        </div>
+        ${tick(ideal, `${fmt(ideal)} g ideal`)}${tick(max, `${fmt(max)} g max`)}
+      </div>
+      <div class="slegend num">
+        <span><i style="background:${level.c}"></i>Added ${fmt(added)} g of ${fmt(ideal)} g</span>
+        <span><i style="background:var(--natural)"></i>Natural ${fmt(natural)} g</span>
+        ${unknown ? `<span><i class="unk" style="background:repeating-linear-gradient(45deg, var(--natural) 0 3px, var(--track) 3px 6px)"></i>Not split ${fmt(unknown)} g (${untracked} older meal${untracked === 1 ? '' : 's'})</span>` : ''}
+      </div>
+    </div>
+  </div>`;
+}
+
 function todayHTML() {
   const day = S.days[S.date];
   const tot = dayTotals(day);
@@ -537,8 +590,9 @@ function todayHTML() {
     ${barHTML(tot.kcal, T.kcal, 'var(--ink)')}
     <div class="rule mid"></div>
     ${macroRows}
+    ${sugarRowHTML(day, tot, T.added_sugar)}
     <div class="rule"></div>
-    <div class="row num" style="font-size:.82rem;color:var(--muted);gap:14px"><span>Sugar ${fmt(tot.sugar)} g</span><span>Sodium ${fmt(tot.sodium)} mg</span></div>
+    <div class="row num" style="font-size:.82rem;color:var(--muted);gap:14px"><span>Sodium ${fmt(tot.sodium)} mg</span></div>
     <p class="togo">${togo}</p>
     ${!S.profile ? `<div class="default-note">These are placeholder targets. <button data-tab="settings">Add your stats</button> to get muscle-building targets for your body.</div>` : ''}
   </section>
@@ -677,6 +731,7 @@ function settingsHTML() {
       <label class="field"><span>Carbs (g)</span><input id="t-carbs" type="number" inputmode="numeric" value="${v(T.carbs)}"></label>
       <label class="field"><span>Fat (g)</span><input id="t-fat" type="number" inputmode="numeric" value="${v(T.fat)}"></label>
       <label class="field"><span>Fiber (g)</span><input id="t-fiber" type="number" inputmode="numeric" value="${v(T.fiber)}"></label>
+      <label class="field"><span>Added sugar ideal (g)</span><input id="t-added_sugar" type="number" inputmode="numeric" value="${v(T.added_sugar ?? SUGAR_LIMIT)}"></label>
     </div>
     <button type="submit" class="btn wide">Save targets</button>
   </form>
@@ -724,8 +779,9 @@ function srcLabel(it) {
 function withBase(it) {
   const o = { name: it.name || '', grams: r0(it.grams), source: it.source || 'estimate' };
   if (it.source_url && /^https?:\/\//.test(it.source_url)) o.source_url = String(it.source_url);
-  NUTRS.forEach(k => o[k] = r1(it[k]));
-  o.base = { grams: o.grams || 0 }; NUTRS.forEach(k => o.base[k] = o[k]);
+  // Keep added_sugar missing on old items, so they still read as "not tracked" instead of 0 g.
+  NUTRS.forEach(k => { if (!(k === 'added_sugar' && it[k] === undefined)) o[k] = r1(it[k]); });
+  o.base = { grams: o.grams || 0 }; NUTRS.forEach(k => { if (o[k] !== undefined) o.base[k] = o[k]; });
   return o;
 }
 
@@ -845,7 +901,8 @@ Rules:
 - If label values are available, use them and scale to the amount eaten: from the note; else the portion printed on the label; else the package's net weight (peso líquido) if it is a single-serve item. Mark those items source "label".
 - Otherwise estimate portions in grams from visual cues (standard plate about 26 cm, cutlery, hands, packaging) or the note, and use standard food composition data. Mark them source "estimate".
 - Split a meal into its separate foods. Include likely hidden calories (cooking oil, butter, dressings, sauces, sugar in drinks) as their own items when they are probably there.
-- grams = amount eaten. kcal in kcal; protein, carbs, fat, fiber, sugar in grams; sodium in milligrams. Round to whole numbers except values under 10, which get one decimal.
+- added_sugar = WHO "free sugars" in the item: sugar added by the manufacturer, cook or eater, plus sugar in honey, syrups, fruit juice and juice concentrates. It does not include sugar naturally in whole fruit, vegetables, or plain milk and plain yogurt (lactose). It is part of "sugar", never more than it. Labels only give total sugars, so use the ingredients and product type: e.g. plain yogurt ≈ 0; a sweetened or fruit yogurt ≈ total sugar minus about 4.5 g per 100 g of lactose; soft drinks, sweets and pastries ≈ all of their sugar; a banana = 0.
+- grams = amount eaten. kcal in kcal; protein, carbs, fat, fiber, sugar, added_sugar in grams; sodium in milligrams. Round to whole numbers except values under 10, which get one decimal.
 - If there is nothing identifiable as food, return an empty items list and explain in assumptions.
 
 Confidence, judged on the final numbers:
@@ -933,7 +990,7 @@ function reviewPrompt(dateKey) {
   const tot = dayTotals(day);
   const meals = (day.meals || []).map(m => {
     const t = sumItems(m.items);
-    return `- ${m.time || '?'} ${m.type || 'Meal'}: ${m.name} — ${r0(t.kcal)} kcal, P ${r0(t.protein)} g, C ${r0(t.carbs)} g, F ${r0(t.fat)} g, fiber ${r1(t.fiber)} g\n` +
+    return `- ${m.time || '?'} ${m.type || 'Meal'}: ${m.name} — ${r0(t.kcal)} kcal, P ${r0(t.protein)} g, C ${r0(t.carbs)} g, F ${r0(t.fat)} g, fiber ${r1(t.fiber)} g, sugar ${r0(t.sugar)} g (added ${r1(t.added_sugar)} g)\n` +
       (m.items || []).map(i => `    · ${i.name} ${r0(i.grams)} g: ${r0(i.kcal)} kcal, P ${r1(i.protein)}, C ${r1(i.carbs)}, F ${r1(i.fat)}`).join('\n');
   }).join('\n');
   const hist = Array.from({ length: 7 }, (_, i) => addDays(dateKey, -(i + 1)))
@@ -944,12 +1001,12 @@ function reviewPrompt(dateKey) {
 
   return `You are a sports nutrition coach reviewing one day of a food log. The person's goal is to build muscle.
 Person: ${who}.
-Daily targets: ${T.kcal} kcal, protein ${T.protein} g, carbs ${T.carbs} g, fat ${T.fat} g, fiber ${T.fiber} g.
+Daily targets: ${T.kcal} kcal, protein ${T.protein} g, carbs ${T.carbs} g, fat ${T.fat} g, fiber ${T.fiber} g. Daily limit: added (free) sugars ${T.added_sugar} g, the WHO's stricter guideline (mention in the review if the day went over it, or got close, and which foods drove it).
 
 Day ${dateKey} — meals:
 ${meals}
 
-Day totals: ${r0(tot.kcal)} kcal, protein ${r0(tot.protein)} g, carbs ${r0(tot.carbs)} g, fat ${r0(tot.fat)} g, fiber ${r1(tot.fiber)} g, sugar ${r0(tot.sugar)} g, sodium ${r0(tot.sodium)} mg.
+Day totals: ${r0(tot.kcal)} kcal, protein ${r0(tot.protein)} g, carbs ${r0(tot.carbs)} g, fat ${r0(tot.fat)} g, fiber ${r1(tot.fiber)} g, sugar ${r0(tot.sugar)} g of which added ${r0(tot.added_sugar)} g, sodium ${r0(tot.sodium)} mg.
 
 Previous 7 days (totals):
 ${hist}
@@ -1011,7 +1068,7 @@ function saveTargets(ev) {
   ev.preventDefault();
   const n = id => { const v = parseFloat($(id).value); return isFinite(v) ? v : null; };
   const T = {};
-  for (const k of ['kcal', 'protein', 'carbs', 'fat', 'fiber']) {
+  for (const k of ['kcal', 'protein', 'carbs', 'fat', 'fiber', 'added_sugar']) {
     const v = n('#t-' + k);
     if (v == null || v <= 0) { toast('Fill in every target'); return; }
     T[k] = Math.round(v);
@@ -1117,7 +1174,7 @@ document.addEventListener('change', async e => {
       const g = parseFloat(t.value) || 0; it.grams = g;
       if (it.base.grams > 0) {
         const ratio = g / it.base.grams;
-        NUTRS.forEach(k => { it[k] = r1(it.base[k] * ratio); const inp = item.querySelector(`[data-f="${k}"]`); if (inp) inp.value = it[k]; });
+        NUTRS.forEach(k => { if (it.base[k] === undefined) return; it[k] = r1(it.base[k] * ratio); const inp = item.querySelector(`[data-f="${k}"]`); if (inp) inp.value = it[k]; });
       } else { it.base.grams = g; }
     } else if (f !== 'name') {
       it[f] = parseFloat(t.value) || 0;
